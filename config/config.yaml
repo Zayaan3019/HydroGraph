@@ -1,0 +1,161 @@
+# Hydro-Graph ST-GNN Configuration
+# Production-grade configuration for Chennai flood forecasting
+
+project:
+  name: "HydroGraph-STGNN"
+  version: "1.0.0"
+  description: "Spatiotemporal Graph Neural Network for Urban Flood Forecasting"
+
+location:
+  city: "Chennai"
+  country: "India"
+  # Bounding box for Chennai [South, West, North, East]
+  bbox: [12.8, 80.1, 13.2, 80.3]
+  # Target CRS for Chennai (UTM Zone 44N)
+  target_crs: "EPSG:32644"
+  # WGS84 for initial downloads
+  wgs84_crs: "EPSG:4326"
+
+graph:
+  network_type: "all"  # OSMnx network type
+  custom_filters:
+    - "['waterway'~'drain|canal']"
+  simplify: true
+  retain_all: false
+
+features:
+  # Static physical features
+  static:
+    terrain:
+      - elevation
+      - slope
+      - twi  # Topographic Wetness Index
+    spectral:
+      - ndvi  # Normalized Difference Vegetation Index
+      - ndwi  # Normalized Difference Water Index
+      - ndbi  # Normalized Difference Built-up Index
+      - imperviousness
+    sar:
+      - vv_polarization  # Sentinel-1 C-band
+  
+  # Temporal features
+  temporal:
+    lag_window: 6  # hours
+    rainfall_sources:
+      - "GPM_IMERG"
+      - "IMD_Gauge"
+
+data:
+  # Data directories
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  graph_dir: "data/graphs"
+  raster_dir: "data/rasters"
+  
+  # Raster data paths (to be populated)
+  rasters:
+    dem: "data/rasters/srtm_30m_chennai.tif"
+    ndvi: "data/rasters/sentinel2_ndvi_10m.tif"
+    ndwi: "data/rasters/sentinel2_ndwi_10m.tif"
+    ndbi: "data/rasters/sentinel2_ndbi_10m.tif"
+    imperviousness: "data/rasters/imperviousness_10m.tif"
+    sar_vv: "data/rasters/sentinel1_vv.tif"
+  
+  # Temporal data
+  precipitation:
+    gpm_imerg_dir: "data/raw/gpm_imerg"
+    imd_gauge_file: "data/raw/imd_chennai_2015.csv"
+
+model:
+  # Model architecture parameters
+  architecture:
+    name: "HydroGraphSTGNN"
+    
+    # Spatial module (GraphSAGE)
+    spatial:
+      num_layers: 3
+      hidden_channels: 128
+      aggregator: "mean"
+      dropout: 0.3
+    
+    # Temporal module (GRU)
+    temporal:
+      hidden_size: 64
+      num_layers: 2
+      dropout: 0.2
+    
+    # Fusion layer
+    fusion:
+      hidden_dims: [256, 128, 64]
+      activation: "relu"
+    
+    # Output head
+    output:
+      activation: "sigmoid"
+  
+  # Mini-batching for OOM prevention
+  neighbor_sampling:
+    num_neighbors: [15, 10, 5]  # Per layer
+    batch_size: 512
+    num_workers: 4
+
+training:
+  # Training parameters
+  epochs: 200
+  early_stopping_patience: 20
+  learning_rate: 0.001
+  weight_decay: 1e-5
+  scheduler:
+    type: "ReduceLROnPlateau"
+    factor: 0.5
+    patience: 10
+  
+  # Loss function (Focal Loss for class imbalance)
+  loss:
+    type: "FocalLoss"
+    alpha: 0.25
+    gamma: 2.0
+  
+  # Data splits (chronological)
+  split:
+    train: 0.7
+    val: 0.15
+    test: 0.15
+  
+  # Metrics
+  metrics:
+    - f1_score
+    - precision
+    - recall
+    - roc_auc
+    - average_precision
+
+inference:
+  # Inference parameters
+  checkpoint_path: "checkpoints/best_model.pth"
+  output_dir: "outputs/predictions"
+  
+  # Visualization
+  visualization:
+    colormap: "RdYlBu_r"
+    tile_provider: "OpenStreetMap"
+    save_html: true
+    save_png: true
+
+logging:
+  level: "INFO"
+  log_dir: "logs"
+  tensorboard: true
+  wandb:
+    enabled: false
+    project: "hydro-graph-stgnn"
+    entity: null
+
+# Historical storm events
+events:
+  chennai_2015:
+    name: "Chennai Floods 2015"
+    start_date: "2015-11-01"
+    end_date: "2015-12-31"
+    peak_date: "2015-12-01"
+    description: "Devastating urban flooding event"
