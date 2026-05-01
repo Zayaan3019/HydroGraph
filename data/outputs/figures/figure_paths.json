@@ -1,0 +1,10 @@
+{
+  "arch": "C:\\Users\\Mohamed Zayaan\\Downloads\\Hydrograph\\data\\outputs\\figures\\fig1_architecture.png",
+  "convergence": "C:\\Users\\Mohamed Zayaan\\Downloads\\Hydrograph\\data\\outputs\\figures\\fig2_convergence.png",
+  "multi_lead": "C:\\Users\\Mohamed Zayaan\\Downloads\\Hydrograph\\data\\outputs\\figures\\fig3_multi_lead.png",
+  "baselines": "C:\\Users\\Mohamed Zayaan\\Downloads\\Hydrograph\\data\\outputs\\figures\\fig4_baselines.png",
+  "degradation": "C:\\Users\\Mohamed Zayaan\\Downloads\\Hydrograph\\data\\outputs\\figures\\fig5_lead_degradation.png",
+  "radar": "C:\\Users\\Mohamed Zayaan\\Downloads\\Hydrograph\\data\\outputs\\figures\\fig6_radar.png",
+  "flood_map": "C:\\Users\\Mohamed Zayaan\\Downloads\\Hydrograph\\data\\outputs\\figures\\fig7_flood_map.png",
+  "calibration": "C:\\Users\\Mohamed Zayaan\\Downloads\\Hydrograph\\data\\outputs\\figures\\fig8_calibration.png"
+}
