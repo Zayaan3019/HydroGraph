@@ -1,161 +1,194 @@
-# Hydro-Graph ST-GNN Configuration
-# Production-grade configuration for Chennai flood forecasting
+# =============================================================================
+# Hydro-Graph ST-GNN v2 — Master Configuration
+# Study Area  : Chennai Metropolitan Region, India
+# Architecture: Dual-Scale Spatiotemporal Graph Attention Network (DS-STGAT)
+# =============================================================================
 
-project:
-  name: "HydroGraph-STGNN"
-  version: "1.0.0"
-  description: "Spatiotemporal Graph Neural Network for Urban Flood Forecasting"
+study_area:
+  name: "Chennai Metropolitan Region"
+  # (left=west, bottom=south, right=east, top=north) — osmnx 2.x format EPSG:4326
+  bbox_demo:  [80.20, 12.95, 80.32, 13.07]   # ~13x13 km  (fast demo / dev)
+  bbox_full:  [79.90, 12.70, 80.40, 13.30]   # ~55x66 km  (full production)
+  crs_geographic: "EPSG:4326"
+  crs_projected:  "EPSG:32644"               # WGS 84 / UTM Zone 44N
+  center_lat: 13.0127
+  center_lon: 80.2600
+  # Coastal reference for distance-to-coast feature (Bay of Bengal)
+  coast_lat:  13.0828
+  coast_lon:  80.2900
+  # Major rivers in Chennai (for proximity features)
+  rivers:
+    - {name: "Adyar",    lat: 12.9716, lon: 80.2426}
+    - {name: "Cooum",    lat: 13.0827, lon: 80.2707}
+    - {name: "Buckingham", lat: 13.0620, lon: 80.2900}
 
-location:
-  city: "Chennai"
-  country: "India"
-  # Bounding box for Chennai [South, West, North, East]
-  bbox: [12.8, 80.1, 13.2, 80.3]
-  # Target CRS for Chennai (UTM Zone 44N)
-  target_crs: "EPSG:32644"
-  # WGS84 for initial downloads
-  wgs84_crs: "EPSG:4326"
-
+# ── Graph Construction ──────────────────────────────────────────────────────
 graph:
-  network_type: "all"  # OSMnx network type
-  custom_filters:
-    - "['waterway'~'drain|canal']"
+  network_type: "all"
   simplify: true
   retain_all: false
+  waterway_filter: '["waterway"~"drain|canal|river|stream|ditch"]'
+  min_edge_length_m: 1.0
+  max_edge_length_m: 5000.0
+  edge_feature_dim: 4    # [elev_diff_norm, length_norm, edge_type, flow_weight]
 
+# ── Feature Engineering ─────────────────────────────────────────────────────
 features:
-  # Static physical features
-  static:
-    terrain:
-      - elevation
-      - slope
-      - twi  # Topographic Wetness Index
-    spectral:
-      - ndvi  # Normalized Difference Vegetation Index
-      - ndwi  # Normalized Difference Water Index
-      - ndbi  # Normalized Difference Built-up Index
-      - imperviousness
-    sar:
-      - vv_polarization  # Sentinel-1 C-band
-  
-  # Temporal features
-  temporal:
-    lag_window: 6  # hours
-    rainfall_sources:
-      - "GPM_IMERG"
-      - "IMD_Gauge"
+  static_dim: 16     # 16 physically-grounded node attributes (see phase2)
+  short_seq_len: 6   # 6-hr short-term rainfall trigger (hourly)
+  long_seq_len: 12   # 24-hr antecedent window (subsampled to 2-hr intervals)
+  input_dim: 34      # static_dim + short_seq_len + long_seq_len = 16+6+12
 
-data:
-  # Data directories
-  raw_dir: "data/raw"
-  processed_dir: "data/processed"
-  graph_dir: "data/graphs"
-  raster_dir: "data/rasters"
-  
-  # Raster data paths (to be populated)
-  rasters:
-    dem: "data/rasters/srtm_30m_chennai.tif"
-    ndvi: "data/rasters/sentinel2_ndvi_10m.tif"
-    ndwi: "data/rasters/sentinel2_ndwi_10m.tif"
-    ndbi: "data/rasters/sentinel2_ndbi_10m.tif"
-    imperviousness: "data/rasters/imperviousness_10m.tif"
-    sar_vv: "data/rasters/sentinel1_vv.tif"
-  
-  # Temporal data
-  precipitation:
-    gpm_imerg_dir: "data/raw/gpm_imerg"
-    imd_gauge_file: "data/raw/imd_chennai_2015.csv"
+  # Real raster data paths (place files here for full accuracy)
+  dem_tif: "data/raw/srtm_chennai.tif"
+  sentinel2_tif: "data/raw/sentinel2_chennai.tif"
+  sentinel1_tif: "data/raw/sentinel1_chennai.tif"
+  rainfall_csv: "data/raw/gpm_imerg_chennai.csv"
 
+  # Use physics-grounded synthetic data when real rasters are unavailable
+  use_synthetic: true
+
+  # SRTM download settings (used when dem_tif does not exist)
+  srtm_cache_dir: "data/raw/srtm_cache"
+
+# ── Temporal / Storm Events ─────────────────────────────────────────────────
+temporal:
+  # Primary training event: 2015 Chennai floods (Nov-Dec)
+  train_event:
+    name: "2015_Chennai_Flood"
+    event_start: "2015-11-01T00:00:00"
+    event_end:   "2015-12-05T23:00:00"
+    peak_start:  "2015-11-28T00:00:00"
+    peak_end:    "2015-12-03T00:00:00"
+    peak_rainfall_mm_hr: 55.0   # historical peak
+
+  # Held-out validation event (synthetic analogue of 2018 floods)
+  val_event:
+    name: "2018_Chennai_Analogue"
+    event_start: "2018-10-15T00:00:00"
+    event_end:   "2018-11-10T23:00:00"
+    peak_start:  "2018-10-25T00:00:00"
+    peak_end:    "2018-10-30T00:00:00"
+    peak_rainfall_mm_hr: 42.0
+
+  timestep_hours: 1
+  # Lead times for multi-horizon forecasting (hours ahead)
+  lead_times: [1, 3, 6, 12]
+
+  # Physical flood threshold parameters
+  flood_threshold_min_mm: 15.0    # min cumulative 6hr rainfall to trigger flood
+  flood_threshold_max_mm: 80.0    # max threshold (high-elevation areas)
+  flood_recovery_halflife_hr: 4.0 # time for flooding to halve after rain stops
+
+# ── Model Architecture: DS-STGAT ────────────────────────────────────────────
 model:
-  # Model architecture parameters
-  architecture:
-    name: "HydroGraphSTGNN"
-    
-    # Spatial module (GraphSAGE)
-    spatial:
-      num_layers: 3
-      hidden_channels: 128
-      aggregator: "mean"
-      dropout: 0.3
-    
-    # Temporal module (GRU)
-    temporal:
-      hidden_size: 64
-      num_layers: 2
-      dropout: 0.2
-    
-    # Fusion layer
-    fusion:
-      hidden_dims: [256, 128, 64]
-      activation: "relu"
-    
-    # Output head
-    output:
-      activation: "sigmoid"
-  
-  # Mini-batching for OOM prevention
-  neighbor_sampling:
-    num_neighbors: [15, 10, 5]  # Per layer
-    batch_size: 512
-    num_workers: 4
+  name: "DS-STGAT"    # Dual-Scale Spatiotemporal Graph Attention Network
 
+  # Feature dimensions
+  static_dim: 16
+  short_seq_len: 6
+  long_seq_len: 12
+  edge_dim: 4          # edge feature dimensions (phase1 output)
+  n_lead_times: 4      # number of forecast horizons (1,3,6,12 hr)
+
+  # Static encoder
+  static_hidden: 128
+  static_out: 64
+
+  # Short-term temporal encoder (6hr GRU)
+  short_gru_hidden: 96
+  short_gru_layers: 2
+
+  # Long-term temporal encoder (24hr antecedent GRU)
+  long_gru_hidden: 64
+  long_gru_layers: 1
+
+  # Temporal cross-attention gate
+  temporal_att_hidden: 96     # output dim after attention fusion
+
+  # Fusion layer (static + temporal)
+  fusion_hidden: 128
+
+  # Spatial encoder (GATv2 + SAGE)
+  gat_hidden: 128
+  gat_heads_l1: 8
+  gat_heads_l2: 4
+  gat_layers: 2
+  sage_hidden: 64
+  sage_layers: 1
+
+  # Output head
+  output_hidden: 32
+
+  # Regularisation
+  dropout: 0.25
+
+# ── Training ─────────────────────────────────────────────────────────────────
 training:
-  # Training parameters
-  epochs: 200
+  seed: 42
+  epochs: 120
+  batch_size: 512
+  lr: 5.0e-4
+  weight_decay: 1.0e-4
+
+  # Focal Tversky Loss (better than standard Focal Loss for spatial imbalance)
+  # FL(TP,FP,FN) = 1 - (TP+e)/(TP + alpha*FP + beta*FN + e) raised to gamma
+  tversky_alpha: 0.30   # FP penalty weight (lower = more recall-focused)
+  tversky_beta:  0.70   # FN penalty weight (higher = penalise missed floods)
+  tversky_gamma: 0.75   # focusing exponent
+
+  # Multi-lead loss weights (shorter leads prioritised)
+  lead_weights: [2.0, 1.5, 1.0, 0.75]
+
+  # Chronological split (no temporal leakage)
+  train_ratio: 0.85     # include enough flood-positive peak hours for supervised learning
+  val_ratio:   0.075    # test gets remaining 0.075, still chronological/no future leakage
+
+  # NeighborLoader / k-hop fallback
+  num_neighbors: [15, 10, 5]
+
+  # Early stopping (monitors val F1 at lead_time=1hr)
   early_stopping_patience: 20
-  learning_rate: 0.001
-  weight_decay: 1e-5
-  scheduler:
-    type: "ReduceLROnPlateau"
-    factor: 0.5
-    patience: 10
-  
-  # Loss function (Focal Loss for class imbalance)
-  loss:
-    type: "FocalLoss"
-    alpha: 0.25
-    gamma: 2.0
-  
-  # Data splits (chronological)
-  split:
-    train: 0.7
-    val: 0.15
-    test: 0.15
-  
-  # Metrics
-  metrics:
-    - f1_score
-    - precision
-    - recall
-    - roc_auc
-    - average_precision
 
-inference:
-  # Inference parameters
-  checkpoint_path: "checkpoints/best_model.pth"
-  output_dir: "outputs/predictions"
-  
-  # Visualization
-  visualization:
-    colormap: "RdYlBu_r"
-    tile_provider: "OpenStreetMap"
-    save_html: true
-    save_png: true
+  # Classification threshold (applied at inference)
+  threshold: 0.50
 
-logging:
-  level: "INFO"
-  log_dir: "logs"
-  tensorboard: true
-  wandb:
-    enabled: false
-    project: "hydro-graph-stgnn"
-    entity: null
+  # Monte Carlo Dropout inference
+  mc_dropout_samples: 20     # forward passes for uncertainty estimation
 
-# Historical storm events
-events:
-  chennai_2015:
-    name: "Chennai Floods 2015"
-    start_date: "2015-11-01"
-    end_date: "2015-12-31"
-    peak_date: "2015-12-01"
-    description: "Devastating urban flooding event"
+  # Cosine annealing LR schedule
+  lr_min: 1.0e-6
+
+  # Baseline comparisons (run automatically after main training)
+  run_baselines: true
+  baseline_epochs: 50
+
+# ── Paths ────────────────────────────────────────────────────────────────────
+paths:
+  raw_dir:        "data/raw"
+  processed_dir:  "data/processed"
+  models_dir:     "data/models"
+  outputs_dir:    "data/outputs"
+
+  graph_gpickle:       "data/processed/chennai_graph.gpickle"
+  node_features:       "data/processed/node_features.parquet"
+  temporal_data:       "data/processed/temporal_data.npz"
+  temporal_val_data:   "data/processed/temporal_val_data.npz"
+  edge_features:       "data/processed/edge_features.npy"
+
+  best_checkpoint:     "data/models/best_model.pt"
+  last_checkpoint:     "data/models/last_model.pt"
+  baseline_rf:         "data/models/baseline_rf.pkl"
+  baseline_lstm:       "data/models/baseline_lstm.pt"
+
+  risk_map_html:       "data/outputs/flood_risk_map.html"
+  risk_map_png:        "data/outputs/flood_risk_map.png"
+  uncertainty_map_png: "data/outputs/uncertainty_map.png"
+  training_curves:     "data/outputs/training_curves.png"
+  calibration_plot:    "data/outputs/calibration_curve.png"
+  metrics_json:        "data/outputs/eval_metrics.json"
+  baselines_json:      "data/outputs/baseline_metrics.json"
+  predictions_csv:     "data/outputs/node_predictions.csv"
+
+# ── Cache version (invalidates stale cached files) ───────────────────────────
+cache_version: "2.1.0"   # bump when config dims/split contracts change
