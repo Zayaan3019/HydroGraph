@@ -263,7 +263,7 @@ def _rebuild_static_features(cfg, G, gdf_nodes, edge_features, feat_path: Path) 
 def _load_graph_data():
     try:
         from hydro_graph.config import load_config
-        from hydro_graph.phase1_graph import GraphConstructor
+        from hydro_graph.phase1_graph import GraphConstructor, orient_drainage_edges
 
         cfg = load_config(None)
 
@@ -276,15 +276,20 @@ def _load_graph_data():
         edges = list(G.edges())
         if not edges:
             return None, "Graph has no edges."
-        edge_index = np.array(edges, dtype=np.int64).T
 
         expected_edge_dim = int(cfg.model.edge_dim)
         if (
             edge_features is None
-            or edge_features.shape[0] != edge_index.shape[1]
+            or edge_features.shape[0] != len(edges)
             or edge_features.shape[1] != expected_edge_dim
         ):
-            edge_features = np.zeros((edge_index.shape[1], expected_edge_dim), dtype=np.float32)
+            edge_features = np.zeros((len(edges), expected_edge_dim), dtype=np.float32)
+
+        # Same directed-drainage enforcement as main.py: a raw list(G.edges())
+        # can be symmetric for waterway edges (older caches, or a live OSM
+        # graph), which would let the UI run inference on a graph the model
+        # wasn't actually trained on.
+        edge_index, edge_features = orient_drainage_edges(G, edge_features)
 
         feat_path = ROOT / cfg.paths.node_features
         static_features: Optional[np.ndarray] = None

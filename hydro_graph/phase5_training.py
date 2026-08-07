@@ -82,6 +82,7 @@ class HydroGraphDataset:
         long_seq_len: int = 12,
         lead_times: Optional[List[int]] = None,
         edge_attr: Optional[np.ndarray] = None,   # [E, 4]
+        rain_norm_fit_end_t: Optional[int] = None,
     ) -> None:
         self.N = static_features.shape[0]
         self.T = rainfall.shape[0]
@@ -100,9 +101,26 @@ class HydroGraphDataset:
             else torch.zeros(edge_index.shape[1], 4, dtype=torch.float32)
         )
 
-        # Global rain normaliser (95th percentile for robustness)
-        self._rain_norm = max(float(np.percentile(rainfall[rainfall > 0], 95)), 1.0) \
-            if (rainfall > 0).any() else 1.0
+        # Rain normaliser (95th percentile for robustness). Fit ONLY on the
+        # training-period rainfall (rain_norm_fit_end_t = end of train split)
+        # so val/test-period rainfall extremes (e.g. the 2015 catastrophic
+        # peak, if it falls in the held-out window) cannot leak their scale
+        # into the features the model sees during training. Falls back to a
+        # full-series fit (with a warning) when no split boundary is given,
+        # e.g. for inference-only datasets built after training is complete.
+        if rain_norm_fit_end_t is not None:
+            fit_end = int(np.clip(rain_norm_fit_end_t, 1, self.T))
+            fit_rain = rainfall[:fit_end]
+        else:
+            logger.warning(
+                "HydroGraphDataset: no rain_norm_fit_end_t given; fitting rain "
+                "normaliser on the FULL series. This leaks val/test rainfall "
+                "scale into training features — only acceptable for "
+                "inference-only datasets built from an already-trained model."
+            )
+            fit_rain = rainfall
+        self._rain_norm = max(float(np.percentile(fit_rain[fit_rain > 0], 95)), 1.0) \
+            if (fit_rain > 0).any() else 1.0
 
     def get_snapshot(self, t: int):
         """Build PyG Data for time step t."""
@@ -257,14 +275,18 @@ class Trainer:
         logger.info("TEST results:")
         for h_idx, h in enumerate(self.cfg.temporal.lead_times):
             logger.info(
-                "  Lead %2dhr: F1=%.4f  Prec=%.4f  Rec=%.4f  AUC=%.4f  CSI=%.4f  Brier=%.4f",
+                "  Lead %2dhr: F1=%.4f  Prec=%.4f  Rec=%.4f  AUC-ROC=%.4f  AUC-PR=%.4f  "
+                "CSI=%.4f  Brier=%.4f  ECE=%.4f  base_rate=%.2f%%",
                 h,
                 metrics.get(f"f1_lead{h_idx}", 0),
                 metrics.get(f"precision_lead{h_idx}", 0),
                 metrics.get(f"recall_lead{h_idx}", 0),
                 metrics.get(f"auroc_lead{h_idx}", 0),
+                metrics.get(f"aucpr_lead{h_idx}", 0),
                 metrics.get(f"csi_lead{h_idx}", 0),
                 metrics.get(f"brier_lead{h_idx}", 0),
+                metrics.get(f"ece_lead{h_idx}", 0),
+                metrics.get(f"base_rate_lead{h_idx}", 0) * 100,
             )
         return metrics
 
@@ -385,6 +407,35 @@ class Trainer:
 
 # ─── Metrics ──────────────────────────────────────────────────────────────────
 
+def _expected_calibration_error(
+    preds_np: np.ndarray,
+    labels_np: np.ndarray,
+    n_bins: int = 10,
+) -> float:
+    """
+    Expected Calibration Error: bin predictions into n_bins equal-width bins,
+    weight each bin's |accuracy - confidence| gap by its share of samples.
+    ECE=0 is perfect calibration; a sigmoid classifier trained purely on a
+    ranking loss (e.g. Tversky) has no reason to land near 0 without explicit
+    calibration (see Priority 4 / plot_calibration for the reliability diagram
+    this number summarises).
+    """
+    n = len(preds_np)
+    if n == 0:
+        return 0.0
+    bins = np.linspace(0.0, 1.0, n_bins + 1)
+    ece = 0.0
+    for i in range(n_bins):
+        lo, hi = bins[i], bins[i + 1]
+        mask = (preds_np >= lo) & (preds_np < hi) if i < n_bins - 1 else (preds_np >= lo) & (preds_np <= hi)
+        if mask.sum() == 0:
+            continue
+        bin_conf = preds_np[mask].mean()
+        bin_acc = labels_np[mask].mean()
+        ece += (mask.sum() / n) * abs(bin_acc - bin_conf)
+    return float(ece)
+
+
 def _compute_metrics(
     preds: torch.Tensor,
     labels: torch.Tensor,
@@ -393,8 +444,13 @@ def _compute_metrics(
     """
     Comprehensive binary classification metrics including hydrological scores.
 
-    Standard: F1, Precision, Recall, AUC-ROC, AUC-PR, Brier Score
+    Standard: F1, Precision, Recall, AUC-ROC, AUC-PR, Brier Score, ECE
     Hydrology: CSI (Critical Success Index), FAR, POD (= Recall)
+
+    AUC-PR (not AUC-ROC) and ECE are the metrics to trust for rare-event
+    flood classification: ROC-AUC flatters classifiers under heavy class
+    imbalance because the false-positive rate denominator (TN-dominated) stays
+    small almost regardless of FP count.
     """
     preds_np = preds.numpy().astype(np.float64)
     labels_np = labels.numpy().astype(int)
@@ -414,6 +470,8 @@ def _compute_metrics(
 
     # Brier score (MSE of probabilities vs. binary labels)
     brier = float(np.mean((preds_np - labels_np.astype(np.float64))**2))
+    base_rate = float(labels_np.mean())
+    ece = _expected_calibration_error(preds_np, labels_np.astype(np.float64))
 
     # AUC scores
     try:
@@ -434,6 +492,8 @@ def _compute_metrics(
         "recall": float(recall),
         "auroc": float(auroc),
         "aucpr": float(aucpr),
+        "ece": float(ece),
+        "base_rate": base_rate,
         "csi": float(csi),
         "far": float(far),
         "pod": float(recall),

@@ -226,8 +226,17 @@ class GraphConstructor:
                     dist = _haversine(ux, uy, vx, vy)
                     G.add_edge(u, v, key=0, length=dist, highway="residential",
                                _edge_type=etype, _drain_capacity=dcap)
-                    G.add_edge(v, u, key=0, length=dist, highway="residential",
-                               _edge_type=etype, _drain_capacity=dcap)
+                    if etype == EDGE_TYPE_ROAD:
+                        # Roads are legitimately bidirectional (two-way streets);
+                        # add the reverse direction explicitly.
+                        G.add_edge(v, u, key=0, length=dist, highway="residential",
+                                   _edge_type=etype, _drain_capacity=dcap)
+                    # Waterway/drain edges are added in ONE direction only here.
+                    # The candidate direction is a placeholder — orient_drainage_edges()
+                    # (called after Phase 2 supplies real elevations) is what actually
+                    # decides which way water flows and will flip this edge if needed.
+                    # Adding both directions for a drain would let flood signal
+                    # propagate uphill, which is physically wrong.
 
         logger.info("Synthetic: %d nodes, %d edges", G.number_of_nodes(), G.number_of_edges())
         return G
@@ -406,6 +415,118 @@ class GraphConstructor:
         self.edge_features = feat
         logger.info("Edge features refined with SRTM elevations.")
         return feat
+
+
+# ─── Directed Drainage Orientation ────────────────────────────────────────────
+
+def orient_drainage_edges(
+    G: nx.DiGraph,
+    edge_features: np.ndarray,   # [E, 4], row-aligned with list(G.edges())
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Build the directed edge_index/edge_attr actually used for GNN message passing.
+
+    Water flows downhill. Neither the OSMnx waterway download nor the synthetic
+    fallback graph can be trusted to encode that: OSM way direction reflects how
+    the feature was digitised (not necessarily flow direction), and the synthetic
+    grid graph previously added every edge in both directions. If both directions
+    of a drainage edge are present, GATv2Conv/SAGEConv will propagate flood
+    signal uphill exactly as readily as downhill, which contradicts the model's
+    core physical claim.
+
+    This function is the single point where that claim is enforced, using the
+    real (Phase-2-refined) elevation stored in edge_attr[:, 0] (elev_diff_norm,
+    positive = current source node is higher, i.e. edge already points downhill):
+
+      - Waterway/drain edges (edge_type == 1): oriented so they always point
+        from higher to lower elevation (flipped if stored backwards). If both
+        directions of the same physical connection are present, only the one
+        with the larger downhill elevation drop is kept — the uphill duplicate
+        is dropped, not just down-weighted.
+      - Road edges (edge_type == 0): left bidirectional. Streets are two-way by
+        construction (OSM digitises most roads with reciprocal edges) and
+        surface runoff along a road is not a channelised, one-way flow the way
+        a drain is, so symmetrising these is a defensible modelling choice.
+
+    Parameters
+    ----------
+    G             : graph whose `list(G.edges())` order matches edge_features rows
+    edge_features : [E, 4] = [elev_diff_norm, length_norm, edge_type, flow_weight]
+
+    Returns
+    -------
+    edge_index : [2, E'] int64, node ids remapped to 0..N-1 index positions
+    edge_attr  : [E', 4] float32, elev_diff_norm >= 0 for every waterway row
+    """
+    node_ids = list(G.nodes())
+    id_to_idx = {nid: i for i, nid in enumerate(node_ids)}
+    edges = list(G.edges())
+    if len(edges) != edge_features.shape[0]:
+        raise ValueError(
+            f"orient_drainage_edges: {len(edges)} graph edges but "
+            f"{edge_features.shape[0]} edge_feature rows — G was mutated "
+            f"after edge_features was computed."
+        )
+
+    road_rows: list = []
+    best_downhill: Dict[Tuple[int, int], np.ndarray] = {}
+    n_flipped = 0
+    n_dropped_uphill_dup = 0
+
+    for i, (u, v) in enumerate(edges):
+        feat = edge_features[i].copy()
+        etype = feat[2]
+        if etype != EDGE_TYPE_WATERWAY:
+            road_rows.append((u, v, feat))
+            continue
+
+        elev_diff_norm = float(feat[0])   # positive = u higher than v
+        if elev_diff_norm < 0.0:
+            u, v = v, u
+            feat[0] = -elev_diff_norm
+            n_flipped += 1
+
+        key = (u, v)
+        rev_key = (v, u)
+        if rev_key in best_downhill:
+            prev_feat = best_downhill[rev_key]
+            if feat[0] >= prev_feat[0]:
+                del best_downhill[rev_key]
+                best_downhill[key] = feat
+            n_dropped_uphill_dup += 1
+        elif key in best_downhill:
+            # Duplicate parallel edge in the same direction: keep steeper drop.
+            if feat[0] > best_downhill[key][0]:
+                best_downhill[key] = feat
+        else:
+            best_downhill[key] = feat
+
+    edge_list, attr_list = [], []
+    for u, v, feat in road_rows:
+        edge_list.append((id_to_idx[u], id_to_idx[v]))
+        attr_list.append(feat)
+    for (u, v), feat in best_downhill.items():
+        edge_list.append((id_to_idx[u], id_to_idx[v]))
+        attr_list.append(feat)
+
+    edge_index = (
+        np.array(edge_list, dtype=np.int64).T if edge_list
+        else np.zeros((2, 0), dtype=np.int64)
+    )
+    edge_attr = (
+        np.stack(attr_list).astype(np.float32) if attr_list
+        else np.zeros((0, edge_features.shape[1]), dtype=np.float32)
+    )
+
+    n_waterway_in = int((edge_features[:, 2] == EDGE_TYPE_WATERWAY).sum())
+    logger.info(
+        "Directed drainage orientation: %d waterway edges -> %d directed "
+        "downhill edges (%d flipped, %d uphill duplicates dropped) | "
+        "%d road edges left bidirectional | total edges: %d",
+        n_waterway_in, len(best_downhill), n_flipped, n_dropped_uphill_dup,
+        len(road_rows), edge_index.shape[1],
+    )
+    return edge_index, edge_attr
 
 
 # ─── Utility ──────────────────────────────────────────────────────────────────
