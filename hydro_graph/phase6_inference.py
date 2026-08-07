@@ -25,6 +25,14 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import geopandas as gpd
+import matplotlib
+# Force a non-interactive backend: this module only ever saves PNGs to disk
+# and is invoked from a batch training/inference pipeline, never from a GUI
+# session. Without this, matplotlib falls back to whatever GUI backend
+# (TkAgg, Qt, ...) happens to be importable, which is not guaranteed to be
+# installed/usable on a given machine (e.g. a minimal Tk install) and would
+# otherwise crash a fully headless run for a reason unrelated to the model.
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import numpy as np
@@ -45,7 +53,7 @@ try:
 except ImportError:
     PYG_AVAILABLE = False
 
-from .phase5_training import HydroGraphDataset, _iter_mini_batches
+from .phase5_training import HydroGraphDataset, _iter_mini_batches, _expected_calibration_error
 from .phase4_model import DualScaleSTGAT
 
 logger = logging.getLogger(__name__)
@@ -456,7 +464,7 @@ class InferenceEngine:
         test_idx: np.ndarray,
         output_path: Optional[str] = None,
         n_bins: int = 10,
-    ) -> str:
+    ) -> Tuple[str, float]:
         """
         Reliability diagram (calibration curve) for lead=1hr predictions.
         A well-calibrated model has probabilities close to the diagonal.
@@ -474,6 +482,7 @@ class InferenceEngine:
 
         preds_np = np.concatenate(all_preds)
         labels_np = np.concatenate(all_labels)
+        ece = _expected_calibration_error(preds_np.astype(np.float64), labels_np.astype(np.float64), n_bins=n_bins)
 
         bins = np.linspace(0, 1, n_bins + 1)
         bin_centres, mean_preds, frac_pos = [], [], []
@@ -494,17 +503,20 @@ class InferenceEngine:
                 spine.set_edgecolor("#444466")
 
         # Calibration curve
-        ax_cal.plot([0, 1], [0, 1], "k--", color="#AAAAAA", lw=1, label="Perfect calibration")
+        ax_cal.plot([0, 1], [0, 1], "--", color="#AAAAAA", lw=1, label="Perfect calibration")
         ax_cal.plot(mean_preds, frac_pos, "o-", color="#2ECC71", lw=2, ms=6, label="DS-STGAT (1hr)")
         ax_cal.fill_between(mean_preds, frac_pos, mean_preds,
                              alpha=0.15, color="#E74C3C", label="Calibration gap")
         ax_cal.set_xlabel("Mean Predicted Probability", color="white", fontsize=10)
         ax_cal.set_ylabel("Fraction of Positives (Observed)", color="white", fontsize=10)
-        ax_cal.set_title("Reliability Diagram (Lead=1hr)", color="white", fontsize=12, fontweight="bold")
+        ax_cal.set_title(f"Reliability Diagram (Lead=1hr)  |  ECE={ece:.4f}", color="white", fontsize=12, fontweight="bold")
         ax_cal.legend(frameon=False, labelcolor="white", fontsize=8)
         ax_cal.grid(True, alpha=0.15, color="white")
         ax_cal.set_xlim(0, 1)
         ax_cal.set_ylim(0, 1)
+        ax_cal.text(0.02, 0.96, f"ECE = {ece:.4f}", transform=ax_cal.transAxes,
+                    color="white", fontsize=11, fontweight="bold", verticalalignment="top",
+                    bbox=dict(boxstyle="round,pad=0.3", facecolor="#1C1C2E", alpha=0.85))
 
         # Histogram of predicted probabilities
         ax_hist.hist(preds_np, bins=n_bins, color="#3498DB", alpha=0.75, label="Predicted probs")
@@ -518,8 +530,8 @@ class InferenceEngine:
         plt.tight_layout()
         plt.savefig(path, dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
         plt.close(fig)
-        logger.info("Calibration plot saved -> %s", path)
-        return path
+        logger.info("Calibration plot saved -> %s  |  ECE=%.4f (n=%d predictions)", path, ece, len(preds_np))
+        return path, ece
 
     # ── CSV Export ────────────────────────────────────────────────────────────
 

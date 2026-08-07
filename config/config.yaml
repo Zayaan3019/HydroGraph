@@ -191,4 +191,8 @@ paths:
   predictions_csv:     "data/outputs/node_predictions.csv"
 
 # ── Cache version (invalidates stale cached files) ───────────────────────────
-cache_version: "2.1.0"   # bump when config dims/split contracts change
+# Bumped to 2.2.0: fixes symmetric drainage edges (Priority 3.8) and
+# rain-normaliser train/test leakage (Priority 1.2). Stale caches built under
+# 2.1.0 must be regenerated — do not trust node_predictions / eval_metrics
+# produced before this version.
+cache_version: "2.2.0"

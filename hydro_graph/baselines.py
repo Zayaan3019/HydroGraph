@@ -1,14 +1,17 @@
 """
 Baselines - Comparison Models for DS-STGAT Evaluation
 =======================================================
-Implements 4 baseline models for rigorous ablation and comparison:
+Implements 5 baseline models for rigorous ablation and comparison:
 
+  0. PersistenceBaseline    — flood(t+h) = flood(t); zero-parameter floor
   1. RandomForestBaseline   — static features + 6hr rainfall (no graph, no temporal)
   2. LSTMOnlyBaseline       — GRU over rainfall sequence (temporal, no graph)
   3. GCNBaseline            — GCN + GRU (graph but no attention, no dual-scale)
   4. GraphSAGEv1Baseline    — GraphSAGE + GRU v1 (graph, single-scale, no edge features)
 
-These are used to quantify the contribution of each DS-STGAT component.
+These are used to quantify the contribution of each DS-STGAT component. Without
+the persistence floor, F1/CSI numbers are unfalsifiable — flood state is
+temporally autocorrelated, so any model can look competent by doing nothing.
 
 Usage:
     from hydro_graph.baselines import run_all_baselines
@@ -40,6 +43,36 @@ from .phase4_model import FocalTverskyLoss
 logger = logging.getLogger(__name__)
 
 LEAD_IDX = 0   # Evaluate baselines on 1-hr lead time for fair comparison
+
+
+# ─── 0. Persistence (t+h = t) ─────────────────────────────────────────────────
+
+class PersistenceBaseline:
+    """
+    Naive forecast: flood(t+h) = flood(t). No learning, no graph, no rainfall,
+    no static features — just "assume the current state holds".
+
+    This is the floor every other model must clear. Without it the project is
+    unfalsifiable: an F1 of, say, 0.6 means nothing on its own if a
+    zero-parameter forecast that just repeats the last observation also gets
+    0.6 because floods are temporally autocorrelated (a flooded node at t is
+    very likely still flooded at t+1).
+    """
+
+    def predict_proba(
+        self,
+        dataset: HydroGraphDataset,
+        idx: np.ndarray,
+        lead_idx: int = LEAD_IDX,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        h = dataset.lead_times[lead_idx]
+        preds_all, labels_all = [], []
+        for t in idx:
+            t = int(t)
+            preds_all.append(dataset.labels[t, :])              # observed state at t, used as the forecast
+            t_future = min(t + h, dataset.T - 1)
+            labels_all.append(dataset.labels[t_future, :])       # actual state at t+h
+        return np.concatenate(preds_all), np.concatenate(labels_all)
 
 
 # ─── 1. Random Forest ────────────────────────────────────────────────────────
@@ -343,13 +376,29 @@ def run_all_baselines(
     base_dir: Path,
 ) -> Dict[str, Dict[str, float]]:
     """
-    Train and evaluate all 4 baseline models. Returns per-model metrics.
-    Uses the 1-hr lead time for comparison (LEAD_IDX=0).
+    Train and evaluate all 5 baseline models (persistence + 4 learned).
+    Returns per-model metrics. Uses the 1-hr lead time for comparison (LEAD_IDX=0).
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     thr = cfg.training.threshold
     epochs = cfg.training.baseline_epochs
     results: Dict[str, Dict[str, float]] = {}
+
+    # ── 0. Persistence ───────────────────────────────────────────────────────
+    logger.info("--- Baseline 0: Persistence (flood(t+h) = flood(t)) ---")
+    try:
+        persist = PersistenceBaseline()
+        preds, labs = persist.predict_proba(dataset, test_idx)
+        results["persistence"] = _compute_metrics(
+            torch.tensor(preds), torch.tensor(labs), thr
+        )
+        logger.info("Persistence  F1=%.4f  AUC=%.4f  CSI=%.4f",
+                    results["persistence"]["f1"],
+                    results["persistence"]["auroc"],
+                    results["persistence"]["csi"])
+    except Exception as e:
+        logger.warning("Persistence baseline failed: %s", e)
+        results["persistence"] = {}
 
     # ── 1. Random Forest ─────────────────────────────────────────────────────
     logger.info("--- Baseline 1: Random Forest ---")

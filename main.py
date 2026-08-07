@@ -29,6 +29,7 @@ import argparse
 import json
 import logging
 import os
+import random
 import sys
 import time
 from pathlib import Path
@@ -49,10 +50,47 @@ logger = logging.getLogger("hydro_graph.main")
 ROOT = Path(__file__).parent
 
 
+# ─── Reproducibility ──────────────────────────────────────────────────────────
+
+def seed_everything(seed: int) -> None:
+    """
+    Seed every RNG the pipeline touches (Python, numpy, torch CPU+CUDA) and
+    request deterministic algorithms. Called once at the top of run_pipeline
+    so that graph/feature/temporal synthesis, the train/val/test split's
+    downstream randomness (dropout masks, weight init, minibatch shuffling)
+    and baseline training are ALL reproducible from this one seed, not just
+    the main-model training loop.
+
+    Residual nondeterminism that this does NOT eliminate (documented, not
+    silently hidden):
+      - scatter/segment-reduce kernels used by GATv2Conv/SAGEConv's message
+        aggregation are not bitwise-deterministic even with the flag below,
+        on both CPU and CUDA, per PyTorch's own documentation.
+      - OSMnx/Overpass graph downloads (--skip-osm off) depend on live OSM
+        data and are NOT reproducible run-to-run; use --skip-osm (synthetic
+        fallback, seed=42 fixed in phase1_graph._build_synthetic_multigraph)
+        for a byte-for-byte reproducible graph.
+      - CUDA convolution algorithm selection can still vary by GPU/driver
+        even with use_deterministic_algorithms(True) in edge cases PyTorch
+        does not cover; CPU-only runs (this environment) are unaffected.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    try:
+        torch.use_deterministic_algorithms(True, warn_only=True)
+    except Exception as exc:
+        logger.warning("torch.use_deterministic_algorithms unavailable: %s", exc)
+    logger.info("Seeded all RNGs with seed=%d (deterministic algorithms requested)", seed)
+
+
 # ─── Imports ──────────────────────────────────────────────────────────────────
 
 from hydro_graph.config import load_config, HydroGraphConfig
-from hydro_graph.phase1_graph import GraphConstructor
+from hydro_graph.phase1_graph import GraphConstructor, orient_drainage_edges
 from hydro_graph.phase2_features import FeatureEngineer
 from hydro_graph.phase3_temporal import (
     TemporalEncoder,
@@ -139,6 +177,7 @@ def run_pipeline(
 ) -> None:
     t_start = time.time()
     cfg.ensure_dirs(ROOT)
+    seed_everything(cfg.training.seed)
 
     if force_retrain:
         _purge_cache(cfg)
@@ -313,37 +352,21 @@ def run_pipeline(
     edges = list(G.edges())
     if len(edges) == 0:
         raise RuntimeError("Graph has no edges — cannot train GNN.")
-    edge_index = np.array(edges, dtype=np.int64).T   # [2, E]
 
     if edge_features is None:
         logger.warning("No edge features available; using zeros [E, 4].")
-        edge_features = np.zeros((edge_index.shape[1], 4), dtype=np.float32)
+        edge_features = np.zeros((len(edges), 4), dtype=np.float32)
 
-    # ── Build Datasets ────────────────────────────────────────────────────────
-    dataset = HydroGraphDataset(
-        static_features=static_features,
-        rainfall=enc.rainfall,
-        labels=enc.labels,
-        edge_index=edge_index,
-        short_seq_len=short_seq,
-        long_seq_len=long_seq,
-        lead_times=lead_times,
-        edge_attr=edge_features,
-    )
+    # Enforce directed drainage flow: waterway edges are oriented downhill
+    # (using real, Phase-2-refined elevation) and de-duplicated so message
+    # passing cannot propagate flood signal uphill. Roads stay bidirectional.
+    # See orient_drainage_edges() docstring for why this can't be decided
+    # earlier, at graph-construction time.
+    edge_index, edge_features = orient_drainage_edges(G, edge_features)
 
-    # Cross-event held-out validation dataset (2018)
-    dataset_val_event = HydroGraphDataset(
-        static_features=static_features,
-        rainfall=enc_val.rainfall,
-        labels=enc_val.labels,
-        edge_index=edge_index,
-        short_seq_len=short_seq,
-        long_seq_len=long_seq,
-        lead_times=lead_times,
-        edge_attr=edge_features,
-    )
-
-    # Chronological splits — lookback = max(short_seq, long_seq*2) for long window
+    # ── Chronological splits — lookback = max(short_seq, long_seq*2) ─────────
+    # Computed BEFORE dataset construction: the rain normaliser fit below
+    # must only see the training window, so it needs train_idx first.
     lookback = max(short_seq, long_seq * 2)
     train_idx, val_idx, test_idx = get_chronological_split(
         T,
@@ -355,6 +378,45 @@ def run_pipeline(
     logger.info(
         "Split: train=%d | val=%d | test=%d steps  (lookback=%d, max_lead=%d)",
         len(train_idx), len(val_idx), len(test_idx), lookback, max_lead,
+    )
+
+    # ── Build Datasets ────────────────────────────────────────────────────────
+    # rain_norm_fit_end_t = one past the last training timestep: the rainfall
+    # normaliser is calibrated ONLY on data available at training time, so
+    # val/test-period rainfall extremes cannot leak their scale into the
+    # features the model is trained on (see HydroGraphDataset docstring).
+    train_end_t = int(train_idx.max()) + 1 if len(train_idx) else T
+    dataset = HydroGraphDataset(
+        static_features=static_features,
+        rainfall=enc.rainfall,
+        labels=enc.labels,
+        edge_index=edge_index,
+        short_seq_len=short_seq,
+        long_seq_len=long_seq,
+        lead_times=lead_times,
+        edge_attr=edge_features,
+        rain_norm_fit_end_t=train_end_t,
+    )
+
+    # Cross-event held-out validation dataset (2018). This event is NEVER
+    # trained on, so it must reuse the normaliser scale learned from the
+    # 2015 training data rather than fitting its own — calibrating against
+    # an event's own extremes before evaluating on it is itself a leak.
+    dataset_val_event = HydroGraphDataset(
+        static_features=static_features,
+        rainfall=enc_val.rainfall,
+        labels=enc_val.labels,
+        edge_index=edge_index,
+        short_seq_len=short_seq,
+        long_seq_len=long_seq,
+        lead_times=lead_times,
+        edge_attr=edge_features,
+        rain_norm_fit_end_t=1,   # placeholder; overwritten immediately below
+    )
+    dataset_val_event._rain_norm = dataset._rain_norm
+    logger.info(
+        "Cross-event (2018) dataset reuses train-fit rain_norm=%.2f mm/hr "
+        "from the 2015 training split.", dataset._rain_norm,
     )
     split_rates = {
         "train": float(enc.labels[train_idx].mean()) * 100 if len(train_idx) else 0.0,
@@ -443,7 +505,7 @@ def run_pipeline(
         _phase_header(5, "Ablation Study -- Baseline Comparisons")
         try:
             from hydro_graph.baselines import run_all_baselines
-            logger.info("Running 4 baselines: RF, LSTM, GCN, SAGEv1 ...")
+            logger.info("Running 5 baselines: Persistence, RF, LSTM, GCN, SAGEv1 ...")
             baseline_metrics = run_all_baselines(
                 dataset, train_idx, val_idx, test_idx, cfg, base_dir=ROOT
             )
@@ -475,8 +537,10 @@ def run_pipeline(
     if html_path:
         logger.info("Interactive map -> %s", html_path)
 
-    cal_path = engine.plot_calibration(dataset, test_idx)
-    logger.info("Calibration curve -> %s", cal_path)
+    cal_path, cal_ece = engine.plot_calibration(dataset, test_idx)
+    logger.info("Calibration curve -> %s  (ECE=%.4f)", cal_path, cal_ece)
+    test_metrics["calibration_ece_lead1h"] = cal_ece
+    trainer.save_metrics(test_metrics)
 
     # ── Final Summary ─────────────────────────────────────────────────────────
     total_time = time.time() - t_start
@@ -539,15 +603,19 @@ def _phase_header(n: int, title: str) -> None:
 def _log_lead_metrics(metrics: dict, lead_times: list, label: str) -> None:
     logger.info("[%s] Per-lead results:", label)
     for h_idx, h in enumerate(lead_times):
-        f1   = metrics.get(f"f1_lead{h_idx}", 0.0)
-        prec = metrics.get(f"precision_lead{h_idx}", 0.0)
-        rec  = metrics.get(f"recall_lead{h_idx}", 0.0)
-        auc  = metrics.get(f"auroc_lead{h_idx}", 0.0)
-        csi  = metrics.get(f"csi_lead{h_idx}", 0.0)
-        br   = metrics.get(f"brier_lead{h_idx}", 0.0)
+        f1    = metrics.get(f"f1_lead{h_idx}", 0.0)
+        prec  = metrics.get(f"precision_lead{h_idx}", 0.0)
+        rec   = metrics.get(f"recall_lead{h_idx}", 0.0)
+        auc   = metrics.get(f"auroc_lead{h_idx}", 0.0)
+        aucpr = metrics.get(f"aucpr_lead{h_idx}", 0.0)
+        csi   = metrics.get(f"csi_lead{h_idx}", 0.0)
+        br    = metrics.get(f"brier_lead{h_idx}", 0.0)
+        ece   = metrics.get(f"ece_lead{h_idx}", 0.0)
+        base  = metrics.get(f"base_rate_lead{h_idx}", 0.0) * 100
         logger.info(
-            "  Lead %2dhr: F1=%.4f  Prec=%.4f  Rec=%.4f  AUC=%.4f  CSI=%.4f  Brier=%.4f",
-            h, f1, prec, rec, auc, csi, br,
+            "  Lead %2dhr: F1=%.4f  Prec=%.4f  Rec=%.4f  AUC-ROC=%.4f  AUC-PR=%.4f  "
+            "CSI=%.4f  Brier=%.4f  ECE=%.4f  base_rate=%.2f%%",
+            h, f1, prec, rec, auc, aucpr, csi, br, ece, base,
         )
 
 
