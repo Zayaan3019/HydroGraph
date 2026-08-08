@@ -1,7 +1,29 @@
 """
+*** DEPRECATED -- CONTAINS UNVERIFIED / HARDCODED NUMBERS ***
+=============================================================================
+This script assembles a Word-document paper draft. It is not generated from
+`data/outputs/eval_metrics.json` or `data/outputs/baseline_metrics.json` --
+any metric values it writes into the .docx are typed literals, exactly like
+the ones removed from `generate_figures.py` (see that script's module
+docstring and `AUDIT_REPORT.md` for the finding this mirrors). Do not use
+its output as a source of truth for this repository's results.
+
+For real, reproducible numbers and figures, run:
+    python main.py --skip-osm --force-retrain
+    python generate_figures.py
+=============================================================================
+
 Generates the DS-STGAT research paper as a Word document (.docx).
 Run: python generate_paper.py
 """
+
+import warnings as _warnings
+_warnings.warn(
+    "generate_paper.py assembles a paper draft with hardcoded/unverified "
+    "metric values, not data/outputs/eval_metrics.json. See the module "
+    "docstring.",
+    stacklevel=2,
+)
 
 from docx import Document
 from docx.shared import Pt, Cm, RGBColor, Inches

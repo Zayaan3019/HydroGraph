@@ -518,8 +518,12 @@ class InferenceEngine:
                     color="white", fontsize=11, fontweight="bold", verticalalignment="top",
                     bbox=dict(boxstyle="round,pad=0.3", facecolor="#1C1C2E", alpha=0.85))
 
-        # Histogram of predicted probabilities
-        ax_hist.hist(preds_np, bins=n_bins, color="#3498DB", alpha=0.75, label="Predicted probs")
+        # Histogram of predicted probabilities. Explicit range=(0,1): predictions
+        # are sigmoid outputs bounded in [0,1] by construction, and a fixed range
+        # keeps this well-defined even in the degenerate case where every
+        # prediction collapses to (near-)the same value -- np.histogram's
+        # auto-range would otherwise raise ValueError when min == max.
+        ax_hist.hist(preds_np, bins=n_bins, range=(0.0, 1.0), color="#3498DB", alpha=0.75, label="Predicted probs")
         ax_hist.set_xlabel("Predicted Flood Probability", color="white", fontsize=10)
         ax_hist.set_ylabel("Count", color="white", fontsize=10)
         ax_hist.set_title("Probability Distribution", color="white", fontsize=12, fontweight="bold")

@@ -7,7 +7,14 @@
 study_area:
   name: "Chennai Metropolitan Region"
   # (left=west, bottom=south, right=east, top=north) — osmnx 2.x format EPSG:4326
-  bbox_demo:  [80.20, 12.95, 80.32, 13.07]   # ~13x13 km  (fast demo / dev)
+  # bbox_demo was previously [80.20, 12.95, 80.32, 13.07] (~13x13 km). At that
+  # size the synthetic-fallback grid builds ~7,800 nodes, and one training
+  # epoch measured ~66 minutes on CPU (AUDIT_REPORT.md §Reproduction) — not
+  # actually fast, despite the "fast demo / dev" label. Shrunk to a size
+  # empirically verified to train in ~11 min/epoch on CPU (~870 nodes) so
+  # `--mode demo` matches its own documented purpose. `bbox_full` (below) is
+  # unchanged and remains the large production target (GPU recommended).
+  bbox_demo:  [80.23, 12.975, 80.27, 13.015]  # ~4.5x4.5 km (fast demo / dev, CPU-tractable)
   bbox_full:  [79.90, 12.70, 80.40, 13.30]   # ~55x66 km  (full production)
   crs_geographic: "EPSG:4326"
   crs_projected:  "EPSG:32644"               # WGS 84 / UTM Zone 44N
@@ -195,4 +202,7 @@ paths:
 # rain-normaliser train/test leakage (Priority 1.2). Stale caches built under
 # 2.1.0 must be regenerated — do not trust node_predictions / eval_metrics
 # produced before this version.
-cache_version: "2.2.0"
+# Bumped to 2.3.0: bbox_demo shrunk (see study_area comment above) so the
+# demo-scale graph/feature/temporal caches change shape; any 2.2.0-tagged
+# cache built under the old, larger bbox_demo is stale under this config.
+cache_version: "2.3.0"

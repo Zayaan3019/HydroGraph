@@ -1,4 +1,32 @@
 """
+*** DEPRECATED -- NOT THE REPRODUCIBILITY ENTRY POINT ***
+=============================================================================
+This script is a SECOND, DIVERGENT pipeline. It reimplements its own graph
+builder (`build_chennai_graph`, standalone grid logic, not
+`hydro_graph.phase1_graph.GraphConstructor`), its own feature builder
+(`build_static_features`, not `hydro_graph.phase2_features.FeatureEngineer`),
+and trains with a different loss/hyperparameters than
+`hydro_graph.phase5_training.Trainer`. It is NOT reconciled with
+`hydro_graph/` and does not share that package's leakage fixes (train-only
+rain-normalisation fit), directed-edge enforcement
+(`orient_drainage_edges`), or ECE calibration reporting.
+
+It writes to `data/outputs/paper_results.json` -- a DIFFERENT file from the
+real pipeline's `data/outputs/eval_metrics.json` /
+`data/outputs/baseline_metrics.json` (written by `python main.py`) -- so
+running this script cannot silently overwrite genuine results, but its
+numbers should NOT be cited as this repository's results. Historically, an
+earlier version of `DS_STGAT_Paper.tex` cited numbers that trace to this
+script, not to `main.py`; see `AUDIT_REPORT.md` §5.14 for the full finding.
+
+For real, reproducible numbers, run:
+    python main.py --skip-osm --force-retrain
+    python generate_figures.py
+
+Kept (not deleted) for reference / potential future porting onto
+`hydro_graph/`'s classes -- see `AUDIT_REPORT.md` for the recommendation.
+=============================================================================
+
 Hydro-Graph DS-STGAT -- Comprehensive Paper Evaluation
 =======================================================
 Produces all quantitative results for a top-conference submission:
@@ -16,6 +44,15 @@ Usage:
 """
 
 from __future__ import annotations
+
+import warnings as _warnings
+_warnings.warn(
+    "evaluate_paper.py is a deprecated, divergent pipeline -- it does not "
+    "share hydro_graph/'s leakage fixes or edge-direction/calibration "
+    "corrections. Run `python main.py` for real, reproducible results. "
+    "See the module docstring for details.",
+    stacklevel=2,
+)
 
 import json
 import logging

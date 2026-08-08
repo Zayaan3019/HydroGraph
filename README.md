@@ -1,442 +1,220 @@
-# Hydro-Graph ST-GNN
+# Hydro-Graph — DS-STGAT
 
-**Production-grade Spatiotemporal Graph Neural Network for Urban Flood Forecasting**
+**Dual-Scale Spatiotemporal Graph Attention Network for urban flood forecasting.**
 
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 [![PyG](https://img.shields.io/badge/PyG-2.3+-3C2179.svg)](https://pytorch-geometric.readthedocs.io/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-## Overview
+> **Read this before citing any number from this repository.** Every
+> reported metric is either (a) computed by the pipeline described below
+> from a **synthetic** benchmark, or (b) explicitly marked otherwise. See
+> [`MODEL_CARD.md`](MODEL_CARD.md) for exactly what is and isn't real, and
+> [`AUDIT_REPORT.md`](AUDIT_REPORT.md) for the leakage/correctness audit
+> this codebase was hardened against.
 
-**Hydro-Graph** is a state-of-the-art Spatiotemporal Graph Neural Network (ST-GNN) designed for hyper-local urban flood forecasting. Unlike traditional grid-based pixel mapping approaches, Hydro-Graph extracts the physical street and drainage topology of a city as a mathematical graph $G=(V,E)$, binds physical terrain and spectral features to nodes, processes sequential rainfall data using a Gated Recurrent Unit (GRU), and routes flood potential spatially using GraphSAGE.
+## What this is
 
-### Key Features
-
-- 🌆 **Graph-Based Urban Modeling**: Extracts street networks and drainage systems from OpenStreetMap
-- 🛰️ **Multi-Modal Feature Integration**: Combines terrain (DEM), spectral (Sentinel-2), and SAR (Sentinel-1) data
-- 🧠 **Hybrid Architecture**: GraphSAGE for spatial propagation + GRU for temporal modeling
-- ⚖️ **Class Imbalance Handling**: Focal Loss to address rare flood events
-- 📊 **Production-Ready**: Strict typing, modular design, comprehensive logging
-- 🗺️ **Interactive Visualization**: Static and interactive flood risk maps
-
-## Architecture
-
-The model implements a sophisticated fusion of spatial and temporal processing:
+Hydro-Graph extracts a city's street + drainage network as a directed graph
+`G = (V, E)`, binds 16 physics-grounded static features to each node
+(elevation, slope, TWI, NDVI/NDWI/NDBI, imperviousness, SAR VV, distance to
+coast/river, drainage-related terms), encodes rainfall at two temporal
+scales (a 6-hour short-term trigger window and a 24-hour antecedent-moisture
+window, each via its own GRU), fuses them through a cross-temporal attention
+gate, propagates the result over the graph with a 2-layer GATv2 + SAGEConv
+spatial encoder that consumes physics-informed edge features (including
+enforced downhill drainage direction), and outputs per-node flood
+probability at 4 forecast horizons (1h / 3h / 6h / 12h) from a shared
+multi-lead sigmoid head.
 
 ```
-Input Features:
-├── Static Physical Features (Per Node)
-│   ├── Terrain: Elevation, Slope, TWI
-│   ├── Spectral: NDVI, NDWI, NDBI, Imperviousness
-│   └── SAR: Sentinel-1 VV Polarization
-└── Temporal Features (Time Series)
-    └── Rainfall: 6-hour lag window (GPM IMERG + IMD Gauge)
-
-Model Pipeline:
-┌─────────────────────────────────────────────────────────┐
-│ 1. Temporal Module (GRU)                                │
-│    - Processes 6-hour rainfall lag window               │
-│    - Generates temporal hidden state                    │
-└─────────────────────────────────────────────────────────┘
-                         ↓
-┌─────────────────────────────────────────────────────────┐
-│ 2. Spatial Module (GraphSAGE)                          │
-│    - 3-layer message passing                            │
-│    - Propagates features through urban topology         │
-└─────────────────────────────────────────────────────────┘
-                         ↓
-┌─────────────────────────────────────────────────────────┐
-│ 3. Fusion Module (MLP)                                  │
-│    - Combines static, temporal, spatial embeddings      │
-└─────────────────────────────────────────────────────────┘
-                         ↓
-┌─────────────────────────────────────────────────────────┐
-│ 4. Output Head (Sigmoid)                                │
-│    - Node-level flood probability: P(Flood) ∈ [0, 1]   │
-└─────────────────────────────────────────────────────────┘
+rainfall[t-6:t]  ──► short GRU ──┐
+                                  ├─► cross-temporal attention gate ─┐
+rainfall[t-24:t:2] ─► long GRU ──┘                                  │
+                                                                     ▼
+static features[16] ──► static encoder ─────────────────────► fusion (MLP)
+                                                                     │
+                                                                     ▼
+              edge features[E,4] ──► GATv2 ×2 + SAGEConv (directed graph)
+                                                                     │
+                                                                     ▼
+                                          multi-lead sigmoid head → P(flood)
+                                                    at 1h / 3h / 6h / 12h
 ```
+
+## The one real implementation
+
+`hydro_graph/` (phases 1-6) driven by `main.py` is the **only** pipeline
+this repository executes. `archive/` holds an earlier v1 scaffold
+(`src/`, `pipeline/`, a second `config` loader, `examples/`) that nothing
+here imports — see `archive/README.md` if you need to compare the two.
+`evaluate_paper.py` and `generate_paper.py` are a divergent, unreconciled
+second pipeline used to draft `DS_STGAT_Paper.tex`; both now carry a
+deprecation warning — don't use them as a source of results.
+
+| Phase | Module | What it does |
+|---|---|---|
+| 1 | `hydro_graph/phase1_graph.py` | Graph construction (OSMnx, with a deterministic synthetic fallback) + `orient_drainage_edges()` (enforces downhill-only waterway edges) |
+| 2 | `hydro_graph/phase2_features.py` | 16-dim static node features (real SRTM/Sentinel raster support, synthetic fallback) |
+| 3 | `hydro_graph/phase3_temporal.py` | Dual-scale rainfall encoding, leakage-free multi-lead flood labels, chronological split |
+| 4 | `hydro_graph/phase4_model.py` | `DualScaleSTGAT` (GATv2 + SAGE spatial encoder, dual GRU temporal encoder, cross-attention gate) |
+| 5 | `hydro_graph/phase5_training.py` | `HydroGraphDataset`, `Trainer` (Focal Tversky loss, per-lead metrics incl. AUC-PR/CSI/ECE), leakage-safe rain normalisation |
+| 6 | `hydro_graph/phase6_inference.py` | Inference, static/interactive risk maps, reliability diagram + ECE |
+| — | `hydro_graph/baselines.py` | Persistence, Random Forest, LSTM-only, GCN+GRU, GraphSAGEv1+GRU baselines |
 
 ## Installation
 
-### Requirements
+```bash
+python -m venv .venv
+.venv\Scripts\activate        # Windows; source .venv/bin/activate on Linux/Mac
+pip install -r requirements.txt
+```
 
-- Python 3.8+
-- CUDA-capable GPU (recommended for training)
-- 16GB+ RAM for large urban graphs
+`osmnx` and `srtm.py` are optional — without them (or without network
+access), graph construction and elevation both fall back to a deterministic
+synthetic model (seed=42), and the pipeline still runs and produces genuine
+metrics from that synthetic benchmark. See [Data provenance](#data-provenance)
+below before treating those metrics as anything more than that.
 
-### Setup
+## Quick start
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/hydro-graph.git
-cd hydro-graph
+# Full pipeline: graph → features → temporal encoding → training → baselines → inference
+python main.py --skip-osm --force-retrain
 
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+# Faster demo wrapper (same real pipeline, friendlier banner, baselines off by default)
+python demo.py
 
-# Install dependencies
-pip install -r requirements.txt
+# Regenerate cross-model comparison figures from data/outputs/*.json
+python generate_figures.py
 
-# Install PyTorch Geometric (adjust for your CUDA version)
-pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.0.0+cu117.html
+# Interactive dashboard (loads the trained checkpoint + cached graph)
+streamlit run streamlit_app.py
+
+# Test suite
+python -m pytest tests/test_pipeline.py -v
 ```
 
-## Quick Start
+Useful `main.py` flags:
 
-### 1. Graph Construction
+| Flag | Effect |
+|---|---|
+| `--mode {demo,full}` | `demo` = small bbox for fast iteration; `full` = full Chennai metro bbox (large, GPU recommended) |
+| `--skip-osm` | Force the deterministic synthetic graph instead of a live OSMnx/Overpass download |
+| `--force-retrain` | Purge all caches (graph/features/temporal/checkpoints) and rebuild from scratch |
+| `--skip-train` | Load the best existing checkpoint and run inference only |
+| `--skip-baselines` | Skip the 5-model baseline ablation |
+| `--epochs N` / `--baseline-epochs N` | Override `config/config.yaml`'s epoch budgets |
+| `--config path/to.yaml` | Use an alternate config file |
 
-```python
-from config import load_config
-from src import GraphConstructor
+All paths are resolved from `config/config.yaml`'s `paths:` section
+(repo-relative) — there are no hardcoded absolute paths in `hydro_graph/`.
 
-# Load configuration
-config = load_config()
+## Data provenance
 
-# Initialize graph constructor
-constructor = GraphConstructor(
-    bbox=config.location.bbox,
-    target_crs=config.location.target_crs,
-    network_type=config.graph.network_type,
-)
+**By default, every run is entirely synthetic.** `config/config.yaml` sets
+`features.use_synthetic: true`, and this repository ships no DEM GeoTIFF,
+Sentinel-1/2 imagery, or GPM IMERG rainfall CSV under `data/raw/`. Concretely:
 
-# Build urban topology graph
-graph = constructor.build_graph()
+- **Graph topology**: OSMnx download of Chennai's real street/waterway
+  network is attempted first; on failure (no network, `osmnx` not
+  installed) it falls back to a synthetic grid graph
+  (`phase1_graph.py::_build_synthetic_multigraph`, fixed seed).
+- **Static features**: procedurally generated from hand-tuned,
+  Chennai-shaped functions (`phase2_features.py`), not sampled from real
+  rasters, unless real `.tif` files are placed at the paths in
+  `config.yaml`'s `features:` section.
+- **Rainfall & flood labels**: a hand-authored synthetic storm profile with
+  fixed event timing/peaks (`phase3_temporal.py`), not GPM IMERG or IMD
+  gauge data. Labels are generated deterministically from that synthetic
+  rainfall, not observed flood extents.
 
-# Save graph
-constructor.save_graph(Path('data/graphs'))
+This is legitimate for exercising and unit-testing a spatiotemporal GNN's
+architecture and training loop. It is **not** a validated flood forecasting
+system, and no metric produced by a synthetic-mode run should be described
+as measuring real-world skill. Full detail, including a known
+train/val/test flood-rate skew from chronological splitting on a single
+continuous event, is in [`MODEL_CARD.md`](MODEL_CARD.md).
+
+## Edge direction — real terrain vs. synthetic proxy
+
+`orient_drainage_edges()` (`phase1_graph.py`) enforces that every waterway
+edge points from higher to lower elevation (message passing along drains
+cannot propagate a flood signal uphill) and removes duplicate/uphill
+copies. Road edges are deliberately left bidirectional (two-way streets are
+real; road-surface runoff isn't channelised the way a drain is).
+
+**What "elevation" means here depends on your run mode.** With real SRTM
+data loaded (`features.dem_tif` pointing at a real GeoTIFF), the downhill
+orientation is derived from measured terrain. In the default synthetic
+mode, it is derived from a procedurally generated elevation surface, not
+measured terrain — a physically-plausible proxy, not ground truth. State
+which mode produced a given result before calling its edge directions
+"terrain-derived."
+
+## Calibration
+
+The output head is a plain sigmoid trained with a ranking-oriented loss
+(Focal Tversky) — there is no a priori reason for it to be calibrated.
+**Do not describe this model's output as "probabilistic" or "calibrated"
+without checking the measured Expected Calibration Error (ECE)** in
+`data/outputs/eval_metrics.json` (`ece_lead*` keys) and the reliability
+diagram at `data/outputs/calibration_curve.png`, both produced from real
+held-out predictions by `main.py` itself.
+
+## Results
+
+Real, reproducible results from the exact command below live in
+`data/outputs/eval_metrics.json` (DS-STGAT, all 4 lead times) and
+`data/outputs/baseline_metrics.json` (Persistence, Random Forest,
+LSTM-only, GCN+GRU, GraphSAGEv1+GRU, all at lead=1h). See
+[`MODEL_CARD.md`](MODEL_CARD.md) for the verbatim numbers from this
+session's run, the exact command and config used, and an honest read of
+what they do and don't show (including the base rate — under class
+imbalance, trust AUC-PR and CSI over ROC-AUC). Cross-model comparison
+figures are regenerated from those two JSON files by `generate_figures.py`
+— it renders nothing it cannot back with a real number.
+
+```bash
+python main.py --skip-osm --force-retrain   # writes eval_metrics.json / baseline_metrics.json
+python generate_figures.py                  # renders figures from those JSON files only
 ```
 
-### 2. Feature Engineering
-
-```python
-from src import FeatureEngineer
-
-# Initialize feature engineer
-engineer = FeatureEngineer(
-    graph=graph,
-    node_gdf=constructor.node_gdf,
-    raster_paths=config.data.rasters,
-    target_crs=config.location.target_crs,
-)
-
-# Extract and bind all features
-graph_with_features = engineer.engineer_all_features()
-```
-
-### 3. Dataset Creation
-
-```python
-from datetime import datetime
-from src import RainfallDataLoader, TemporalDatasetCreator, HydroGraphDataset
-
-# Initialize rainfall loader
-rainfall_loader = RainfallDataLoader(
-    gpm_dir=config.data.precipitation.gpm_imerg_dir,
-    imd_file=config.data.precipitation.imd_gauge_file,
-    bbox=config.location.bbox,
-)
-
-# Create temporal dataset
-dataset_creator = TemporalDatasetCreator(
-    graph=graph_with_features,
-    rainfall_loader=rainfall_loader,
-    lag_window=config.features.temporal.lag_window,
-)
-
-# Generate dataset for storm event
-start_date = datetime(2015, 11, 1)
-end_date = datetime(2015, 12, 31)
-data_list = dataset_creator.create_temporal_sequence(start_date, end_date)
-
-# Create PyG dataset and split
-dataset = HydroGraphDataset(data_list)
-train_data, val_data, test_data = dataset.train_val_test_split(
-    train_ratio=0.7, val_ratio=0.15, test_ratio=0.15
-)
-```
-
-### 4. Model Training
-
-```python
-from torch_geometric.loader import NeighborLoader
-from src import HydroGraphSTGNN, Trainer
-
-# Create data loaders
-train_loader = NeighborLoader(
-    train_data,
-    num_neighbors=config.model.neighbor_sampling.num_neighbors,
-    batch_size=config.model.neighbor_sampling.batch_size,
-)
-
-val_loader = NeighborLoader(val_data, num_neighbors=[15, 10, 5], batch_size=512)
-
-# Initialize model
-model = HydroGraphSTGNN(
-    num_static_features=8,  # elevation, slope, twi, ndvi, ndwi, ndbi, imperviousness, sar_vv
-    lag_window=6,
-    spatial_config=config.model.architecture.spatial,
-    temporal_config=config.model.architecture.temporal,
-    fusion_config=config.model.architecture.fusion,
-)
-
-# Initialize trainer
-trainer = Trainer(
-    model=model,
-    train_loader=train_loader,
-    val_loader=val_loader,
-    config=config,
-    device='cuda',
-)
-
-# Train model
-trainer.train(num_epochs=config.training.epochs)
-```
-
-### 5. Inference and Visualization
-
-```python
-from src import FloodPredictor, GeospatialVisualizer
-
-# Load trained model
-predictor = FloodPredictor(
-    model=model,
-    checkpoint_path=Path('checkpoints/best_model.pth'),
-    device='cuda',
-)
-
-# Generate predictions
-test_data_obj = test_data.get(0)  # First test snapshot
-predictions = predictor.predict(test_data_obj)
-
-# Create visualizations
-visualizer = GeospatialVisualizer(
-    graph=graph,
-    node_gdf=constructor.node_gdf,
-    edge_gdf=constructor.edge_gdf,
-)
-
-# Static map
-visualizer.plot_static_map(
-    predictions=predictions,
-    output_path=Path('outputs/flood_risk_map.png'),
-    title='Chennai Flood Risk - December 2015',
-)
-
-# Interactive map
-visualizer.create_interactive_map(
-    predictions=predictions,
-    output_path=Path('outputs/flood_risk_map.html'),
-)
-```
-
-## Project Structure
+## Project structure
 
 ```
-hydro-graph/
+HydroGraph_repo/
+├── main.py                  # single pipeline entry point (phases 1-6)
+├── demo.py                  # thin CLI wrapper over main.py with a friendly banner
+├── generate_figures.py      # cross-model comparison figures from real eval JSONs
+├── streamlit_app.py         # interactive dashboard
 ├── config/
-│   ├── __init__.py
-│   ├── config.yaml              # Main configuration file
-│   └── config_loader.py         # Pydantic configuration loader
-├── src/
-│   ├── __init__.py
-│   ├── graph_construction.py    # Phase 1: Graph extraction
-│   ├── feature_engineering.py   # Phase 2: Feature extraction
-│   ├── dataset.py               # Phase 3: Dataset creation
-│   ├── model.py                 # Phase 4: ST-GNN architecture
-│   ├── trainer.py               # Phase 5: Training pipeline
-│   └── inference.py             # Phase 6: Inference & visualization
+│   └── config.yaml          # single source of truth for all paths/hyperparameters
+├── hydro_graph/              # the real pipeline (phases 1-6 + baselines + config loader)
+├── tests/
+│   └── test_pipeline.py     # pytest suite (run via `pytest tests/test_pipeline.py`)
 ├── data/
-│   ├── raw/                     # Raw data (DEM, Sentinel, GPM)
-│   ├── processed/               # Processed datasets
-│   ├── graphs/                  # Graph pickle files
-│   └── rasters/                 # GeoTIFF files
-├── outputs/
-│   ├── predictions/             # Model predictions
-│   └── visualizations/          # Maps and plots
-├── checkpoints/                 # Model checkpoints
-├── logs/                        # Training logs
-├── examples/
-│   ├── end_to_end_pipeline.py   # Complete workflow
-│   └── custom_training.py       # Advanced training
-├── requirements.txt
-└── README.md
+│   ├── raw/                 # real DEM/Sentinel/rainfall inputs go here (empty by default)
+│   ├── processed/           # cached graph/features/temporal tensors
+│   ├── models/              # checkpoints
+│   └── outputs/             # eval_metrics.json, baseline_metrics.json, maps, figures
+├── archive/                  # dead v1 scaffold — see archive/README.md
+├── evaluate_paper.py         # deprecated, divergent pipeline — do not cite its numbers
+├── generate_paper.py         # deprecated .docx generator — do not cite its numbers
+├── MODEL_CARD.md             # data provenance, splits, real metrics, limitations
+└── AUDIT_REPORT.md           # leakage/correctness audit findings and fixes
 ```
 
-## Configuration
+## Reproducibility
 
-The system is fully configurable via `config/config.yaml`. Key parameters:
-
-### Location Settings
-```yaml
-location:
-  city: "Chennai"
-  bbox: [12.8, 80.1, 13.2, 80.3]  # [South, West, North, East]
-  target_crs: "EPSG:32644"         # UTM Zone 44N for Chennai
-```
-
-### Model Architecture
-```yaml
-model:
-  architecture:
-    spatial:
-      num_layers: 3
-      hidden_channels: 128
-      aggregator: "mean"
-    temporal:
-      hidden_size: 64
-      num_layers: 2
-    fusion:
-      hidden_dims: [256, 128, 64]
-```
-
-### Training Parameters
-```yaml
-training:
-  epochs: 200
-  learning_rate: 0.001
-  loss:
-    type: "FocalLoss"
-    alpha: 0.25
-    gamma: 2.0
-```
-
-## Data Preparation
-
-### Required Data Sources
-
-1. **DEM (Digital Elevation Model)**
-   - Source: SRTM 30m or ASTER GDEM
-   - Resolution: 30m
-   - Format: GeoTIFF
-
-2. **Sentinel-2 Optical Data**
-   - Bands: B2 (Blue), B3 (Green), B4 (Red), B8 (NIR), B11 (SWIR)
-   - Pre-computed indices: NDVI, NDWI, NDBI, Imperviousness
-   - Resolution: 10m
-   - Format: GeoTIFF
-
-3. **Sentinel-1 SAR Data**
-   - Polarization: VV
-   - Resolution: 10m
-   - Format: GeoTIFF
-
-4. **Precipitation Data**
-   - Source: GPM IMERG (0.1° hourly) or IMD Gauge
-   - Format: NetCDF/CSV
-   - Temporal coverage: Storm event period
-
-### Data Organization
-
-Place data files in the following structure:
-```
-data/
-├── rasters/
-│   ├── srtm_30m_chennai.tif
-│   ├── sentinel2_ndvi_10m.tif
-│   ├── sentinel2_ndwi_10m.tif
-│   ├── sentinel2_ndbi_10m.tif
-│   ├── imperviousness_10m.tif
-│   └── sentinel1_vv.tif
-└── raw/
-    ├── gpm_imerg/
-    │   └── *.nc4
-    └── imd_chennai_2015.csv
-```
-
-## Performance
-
-### Metrics
-
-The model is evaluated using:
-- **F1-Score**: Harmonic mean of precision and recall
-- **Precision**: True Positives / (True Positives + False Positives)
-- **Recall**: True Positives / (True Positives + False Negatives)
-- **ROC-AUC**: Area under ROC curve
-- **Average Precision**: Area under precision-recall curve
-
-### Computational Requirements
-
-| Operation | GPU Memory | Time (Chennai, ~5000 nodes) |
-|-----------|------------|------------------------------|
-| Graph Construction | - | ~5 minutes |
-| Feature Engineering | - | ~10 minutes |
-| Training (200 epochs) | 8GB | ~2 hours |
-| Inference (1 snapshot) | 2GB | <1 second |
-
-## Advanced Usage
-
-### Custom Loss Functions
-
-```python
-from src.trainer import Trainer
-
-class CustomLoss(nn.Module):
-    def __init__(self):
-        super().__init__()
-    
-    def forward(self, pred, target):
-        # Your custom loss
-        return loss
-
-trainer.criterion = CustomLoss()
-```
-
-### Mini-Batch Training for Large Graphs
-
-For graphs with >10,000 nodes, use inductive mini-batching:
-
-```python
-from torch_geometric.loader import NeighborLoader
-
-loader = NeighborLoader(
-    dataset,
-    num_neighbors=[15, 10, 5],  # Per layer
-    batch_size=512,
-    num_workers=4,
-)
-```
-
-## Citation
-
-If you use this code for your research, please cite:
-
-```bibtex
-@software{hydro_graph_2026,
-  title={Hydro-Graph: Spatiotemporal Graph Neural Network for Urban Flood Forecasting},
-  author={Your Name},
-  year={2026},
-  url={https://github.com/yourusername/hydro-graph}
-}
-```
+`main.py::seed_everything()` seeds Python `random`, numpy, and torch
+(CPU+CUDA) and requests deterministic algorithms once at pipeline start —
+see its docstring for the residual nondeterminism this does not eliminate
+(non-bitwise-deterministic scatter/segment-reduce kernels behind
+`GATv2Conv`/`SAGEConv`; live OSM downloads are inherently non-reproducible,
+hence `--skip-osm` for a byte-for-byte reproducible graph).
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Acknowledgments
-
-- OpenStreetMap contributors for urban topology data
-- NASA for GPM IMERG precipitation data
-- ESA for Sentinel-1 and Sentinel-2 satellite data
-- IMD (India Meteorological Department) for gauge data
-
-## Contributing
-
-Contributions are welcome! Please:
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-## Contact
-
-For questions or collaboration:
-- Email: your.email@example.com
-- GitHub Issues: [https://github.com/yourusername/hydro-graph/issues](https://github.com/yourusername/hydro-graph/issues)
-
----
-
-**Built with ❤️ for resilient cities**
+MIT — see `LICENSE`.
