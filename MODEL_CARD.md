@@ -46,7 +46,7 @@ synthetic" data throughout. It is **not** a validated flood forecasting
 system, and metrics from it say nothing about real-world skill — they
 describe how well DS-STGAT can recover a synthetic label function it was
 partly informed by (the label generator itself propagates through the same
-graph edges the GNN is given, see `flags/leakage-audit.md` finding L-3 for
+graph edges the GNN is given, see `AUDIT_REPORT.md` §1.5 for
 why that inflates the graph's apparent advantage over non-graph baselines
 compared to a benchmark with independently-labeled ground truth).
 
@@ -72,25 +72,102 @@ walk-forward scheme across several events.
 
 ## Metrics
 
-Real numbers, generated in this session, live in
-`data/outputs/eval_metrics.json` and `data/outputs/baseline_metrics.json`
-after running the reproduction command below — see `AUDIT_REPORT.md` for the
-verbatim before/after values captured for this audit, with file paths.
-**Do not cite the figures embedded in `DS_STGAT_Paper.tex` or
-`data/outputs/figures/*.png`** without re-running the pipeline first: those
-were produced by a separate one-off script (`evaluate_paper.py`) on a
-machine/directory (`data/outputs/figures/figure_paths.json` points at
-`C:\...\Downloads\Hydrograph\...`) that no longer exists anywhere on this
-system, and `data/outputs/eval_metrics.json` / `baseline_metrics.json` were
-empty at the start of this audit — those claimed numbers were never
-reproducible from this repository's committed state.
+**Real numbers, generated in this session**, live in
+`data/outputs/eval_metrics.json`, `data/outputs/baseline_metrics.json`, and
+`data/outputs/cross_event_metrics.json` — all three written directly by
+`python main.py`, not typed in by hand. **Do not cite the numbers baked into
+`DS_STGAT_Paper.tex`** or produced by `evaluate_paper.py` /
+`generate_paper.py`: both carry a deprecation banner now — they are a
+second, unreconciled pipeline whose numbers were never connected to this
+repository's real training/evaluation code path (see `AUDIT_REPORT.md`
+§2.6 and §5.14). The figures under `data/outputs/figures/` are regenerated
+by `generate_figures.py`, which loads only the JSON files above and renders
+nothing it can't back with a real number. `AUDIT_REPORT.md` §Reproduction
+documents an earlier, smaller (225-node, 3-epoch) scratch verification run
+from the prior audit session — the table below **supersedes** it as the
+current, canonical result, produced at the repo's real `data/processed/` /
+`data/outputs/` paths, not a scratch directory.
 
-Primary metrics: F1, Precision, Recall, AUC-ROC, **AUC-PR** (the one to trust
-under the ~15-30% base rate here — ROC-AUC flatters rare-event classifiers),
-CSI/FAR/POD (hydrology-standard skill scores), Brier score, and **ECE**
-(Expected Calibration Error, added this audit — see Calibration below).
-Report at all 4 lead times, plus baseline margins over Persistence
-(added this audit), Random Forest, LSTM-only, GCN+GRU, and GraphSAGEv1+GRU.
+Primary metrics: F1, Precision, Recall, AUC-ROC, **AUC-PR** (the one to
+trust under this benchmark's class imbalance — ROC-AUC flatters rare-event
+classifiers), CSI/FAR/POD (hydrology-standard skill scores), Brier score,
+and **ECE** (Expected Calibration Error).
+
+**Exact reproduction command** (also see `--baseline-epochs`, added this
+session, and the `bbox_demo` change noted under Reproducibility below):
+
+```bash
+python main.py --skip-osm --force-retrain --epochs 15 --baseline-epochs 15
+```
+
+Graph: 870 nodes, 3,880 edges (68 waterway edges, all verified oriented
+downhill). Split: train=683 steps (flood rate 14.93%), val=60 (99.71%),
+test=61 (62.12%) — the chronological split-skew limitation described above,
+reproduced again at this scale.
+
+**DS-STGAT, test (2015 event)**:
+
+| Lead | F1 | Precision | Recall | AUC-ROC | AUC-PR | CSI | Brier | ECE | base rate |
+|---|---|---|---|---|---|---|---|---|---|
+| 1h  | 0.7538 | 0.6048 | 1.0000 | 0.4856 | 0.5989 | 0.6048 | 0.3952 | 0.3952 | 60.48% |
+| 3h  | 0.7279 | 0.5721 | 1.0000 | 0.4981 | 0.5712 | 0.5721 | 0.4278 | 0.4278 | 57.21% |
+| 6h  | 0.6894 | 0.5260 | 1.0000 | 0.5001 | 0.5260 | 0.5260 | 0.4740 | 0.4740 | 52.60% |
+| 12h | 0.6235 | 0.4529 | 1.0000 | 0.5000 | 0.4529 | 0.4529 | 0.5471 | 0.5471 | 45.29% |
+
+**Baselines, same test split, lead=1h**:
+
+| Model | F1 | Precision | Recall | AUC-ROC | AUC-PR | CSI | Brier | ECE |
+|---|---|---|---|---|---|---|---|---|
+| Persistence   | **0.9628** | 0.9501 | 0.9759 | **0.9487** | 0.9418 | **0.9283** | **0.0456** | **0.0456** |
+| Random Forest | 0.8912 | **0.9999** | 0.8038 | 0.9776 | **0.9873** | 0.8038 | 0.0914 | 0.1161 |
+| LSTM-only     | 0.7538 | 0.6048 | 1.0000 | 0.5000 | 0.6048 | 0.6048 | 0.3952 | 0.3952 |
+| GCN+GRU       | 0.7538 | 0.6048 | 1.0000 | 0.5000 | 0.6048 | 0.6048 | 0.3952 | 0.3952 |
+| SAGEv1+GRU    | 0.7538 | 0.6048 | 1.0000 | 0.5000 | 0.6048 | 0.6048 | 0.3952 | 0.3952 |
+| **DS-STGAT**  | 0.7538 | 0.6048 | 1.0000 | 0.4856 | 0.5989 | 0.6048 | 0.3952 | 0.3952 |
+
+**Honest reading, not spun**: at this training budget, DS-STGAT (and every
+other *learned neural* baseline — LSTM-only, GCN+GRU, SAGEv1+GRU) collapsed
+to predicting "flood" for essentially every node at every lead time
+(`recall_lead*` = 1.0000, `tn`/`fn` = 0 in the raw JSON for all four —
+i.e. zero true negatives, zero false negatives, at every lead). AUC-ROC
+sits at ~0.48-0.50 for all four — no better than a coin flip at ranking
+flooded vs. non-flooded nodes; the F1/CSI scores that look moderate
+(0.62-0.75) are an artifact of the test split's high base rate (45-60%
+positive, itself a symptom of the chronological split-skew limitation
+described above), not evidence of learned skill. **DS-STGAT lost to
+Persistence and Random Forest by a wide margin on every metric that
+matters under this base rate** (AUC-ROC, AUC-PR, ECE, Brier), and did not
+beat the three other learned baselines — they collapsed to the identical
+trivial solution. `best_model.pt`'s selected checkpoint was epoch 1 (val
+F1 peaked there and never moved again across 15 epochs — see
+`real_run.err.log`-style training logs: `loss`, `val_loss`, `F1@1h`, and
+`AUC@1h` are frozen to 4 decimal places from epoch 2 onward). This is the
+same failure mode the leakage audit already flagged as a HIGH-severity,
+not-yet-fixed limitation: a recall-heavy Focal Tversky loss
+(`tversky_beta=0.70`) combined with a validation split that is 99.71%
+positive rewards a trivial "always predict flood" solution and gives
+early stopping nothing better to select. **This is the honest, reportable
+outcome the task anticipated ("a drop is the expected outcome") — it is
+evidence against this specific training configuration on this specific
+benchmark, not necessarily against the architecture.** The two
+non-neural baselines (Persistence, a zero-parameter heuristic; Random
+Forest, which sees no chronological ordering to exploit and is not
+vulnerable to this optimization pathology) were unaffected, which is
+itself informative: the failure is specific to gradient-based training
+under this loss/split combination, not the underlying benchmark.
+
+**Cross-event (2018 analogue)**, DS-STGAT: F1=0.4628, AUC-ROC=0.44-0.50,
+CSI=0.3011, ECE=0.6989, base_rate=30.11% (all 4 leads identical, same
+collapsed-checkpoint pattern). Included for completeness, not as a
+generalisation claim — full table in `data/outputs/cross_event_metrics.json`.
+
+**What would need to change to get a real result here** (not attempted this
+session, per the explicit instruction not to tune away a genuine finding):
+address the split skew (multi-event or purged walk-forward splitting, not
+a single continuous event), reconsider `tversky_beta` given how easily it
+lets the loss get "free" recall at test-base-rate cost, and/or train for
+enough epochs/patience to see if the collapse is a transient local optimum
+or the loss landscape's actual attractor at this scale.
 
 ## Calibration
 
@@ -101,9 +178,16 @@ audit the pipeline never computed a calibration number, only a reliability
 diagram to eyeball. `_expected_calibration_error()` (`phase5_training.py`)
 now computes ECE alongside every other metric, and
 `InferenceEngine.plot_calibration()` prints it on the reliability diagram
-and returns it. **Until you have looked at a real ECE number, do not call
-this model's output "probabilistic"** — see `AUDIT_REPORT.md` for the
-measured value.
+(`data/outputs/calibration_curve.png`, real held-out predictions) and
+returns it. **Measured this session: ECE=0.3952 at lead=1h** (`ece_lead0`
+in `eval_metrics.json`) — badly uncalibrated, though this specific number
+is confounded by the same collapsed-checkpoint issue above (a model that
+predicts ~1.0 for every node has a degenerate, not meaningfully
+"miscalibrated in an interesting way," reliability curve). Persistence's
+ECE (0.0456) and Random Forest's (0.1161) on the identical split show what
+a non-degenerate baseline's calibration looks like here for comparison.
+**Do not call this model's output "probabilistic" or "calibrated"** — the
+measured number says it plainly isn't, at this training budget.
 
 ## Edge direction
 
@@ -124,8 +208,17 @@ surface runoff is not channelised the way a drain is).
 One command regenerates every number in `data/outputs/`:
 
 ```bash
-python main.py --skip-osm --force-retrain
+python main.py --skip-osm --force-retrain --epochs 15 --baseline-epochs 15
 ```
+
+This is the exact command used to produce the numbers in this document —
+`--epochs 15 --baseline-epochs 15` overrides `config/config.yaml`'s
+production defaults (120 / 50) for CPU tractability at demo scale (~7-9
+min/epoch measured this session; 120 epochs would be several hours). Omit
+both flags to use the config's full production budget (recommended on a
+GPU, or if you have hours to spare on CPU) — that has **not** been run in
+this repository and would very plausibly produce a different (and
+hopefully non-collapsed) result than the one documented above.
 
 - `--skip-osm` forces the synthetic-fallback graph (seed=42, deterministic)
   instead of a live OSMnx/Overpass download, which is not reproducible
@@ -144,6 +237,16 @@ regenerable outputs — checkpoint, metrics JSON, baseline JSON, predictions
 CSV, all PNGs/HTML — live under `data/models/` and `data/outputs/` per the
 `paths:` section of the config, not scattered elsewhere.
 
+**On `bbox_demo`'s size**: the original demo bbox (~13x13 km) builds a
+~7,800-node synthetic graph, at which one training epoch measured ~66
+minutes on CPU (`AUDIT_REPORT.md` §Reproduction) — not actually fast. It has
+been shrunk to a size (~4.5x4.5 km, ~870 nodes) empirically verified to
+train in ~11 min/epoch on CPU, so `--mode demo` (the default) matches its
+own documented purpose. `--mode full` is unchanged and remains the large
+production target — budget a GPU or a multi-day CPU run for it, and see
+`--epochs`/`--baseline-epochs` to control the trade-off between wall time
+and training budget explicitly.
+
 ## Limitations (say these out loud on a resume)
 
 1. **Entirely synthetic** end to end — no real DEM, satellite imagery, or
@@ -158,10 +261,20 @@ CSV, all PNGs/HTML — live under `data/models/` and `data/outputs/` per the
    help on independently-observed flood extents.
 3. Chronological train/val/test flood-rate skew (documented above) means
    early stopping and the reported val curve are not a representative
-   estimate of deployment-time performance.
-4. Calibration is whatever the measured ECE says it is — see
-   `AUDIT_REPORT.md` for the number, and do not describe the output as
-   "probabilistic" if it isn't.
+   estimate of deployment-time performance. **This is not theoretical** —
+   at the 15-epoch/870-node scale run this session, it caused DS-STGAT and
+   every other gradient-trained baseline (LSTM-only, GCN+GRU, SAGEv1+GRU)
+   to collapse to a trivial "always predict flood" solution, selected at
+   epoch 1 and never improved on (see Metrics above for the full table and
+   raw-JSON evidence: recall=1.0000 and zero true/false negatives at every
+   lead, for all four learned neural models). DS-STGAT lost to both
+   non-neural baselines (Persistence, Random Forest) by a wide margin.
+   Do not cite this session's DS-STGAT numbers as evidence the
+   architecture works — they demonstrate the split-skew failure mode, not
+   the model's ceiling.
+4. Calibration is whatever the measured ECE says it is (0.3952 at lead=1h
+   this session, badly uncalibrated — see Calibration above), and do not
+   describe the output as "probabilistic" if it isn't.
 5. Cross-event ("2018 analogue") evaluation reuses the same procedural
    rainfall/label generator with different event timing/intensity — it is a
    test of robustness to a different synthetic storm shape, not of

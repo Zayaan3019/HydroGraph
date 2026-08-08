@@ -489,6 +489,15 @@ def run_pipeline(
         logger.info("--- Cross-event evaluation (2018 analogue) ---")
         cross_metrics = trainer.evaluate(dataset_val_event, val_event_steps)
         _log_lead_metrics(cross_metrics, cfg.temporal.lead_times, label="CROSS-2018")
+        cross_path = ROOT / cfg.paths.outputs_dir / "cross_event_metrics.json"
+        cross_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(cross_path, "w") as fh:
+            json.dump(
+                {k: float(v) if isinstance(v, (float, np.floating)) else v
+                 for k, v in cross_metrics.items()},
+                fh, indent=2,
+            )
+        logger.info("Cross-event (2018) metrics saved -> %s", cross_path)
     else:
         cross_metrics = {}
         logger.warning("2018 val event too short for evaluation.")
@@ -663,6 +672,10 @@ def parse_args() -> argparse.Namespace:
         help="Override number of training epochs from config",
     )
     p.add_argument(
+        "--baseline-epochs", type=int, default=None,
+        help="Override number of baseline (LSTM/GCN/SAGEv1) training epochs from config",
+    )
+    p.add_argument(
         "--synthetic", action="store_true", default=False,
         help="Force synthetic raster data (ignores real DEM/Sentinel files)",
     )
@@ -676,6 +689,8 @@ def main() -> None:
     # CLI overrides
     if args.epochs is not None:
         cfg.training.epochs = args.epochs
+    if args.baseline_epochs is not None:
+        cfg.training.baseline_epochs = args.baseline_epochs
     if args.synthetic:
         cfg.features.use_synthetic = True
 

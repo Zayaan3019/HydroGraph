@@ -662,3 +662,56 @@ implying real-world data sources were used for its reported numbers. That
 directly contradicts what every code path in this repository actually does
 (`use_synthetic=True`, empty `data/raw/`). Reverted — see the diff on that
 file and `MODEL_CARD.md`.
+
+---
+
+## Addendum — follow-up session, Phase 2 completion
+
+A second session picked this repo back up specifically to close the two
+items left `[ ]` above and finish what `06-hydrograph.md` (Phase 2) asked
+for. Summary — full detail in `MODEL_CARD.md`, which is now the canonical,
+up-to-date source for real numbers (this file's §Reproduction numbers above
+are superseded, kept only as a historical record of the audit):
+
+- **`generate_figures.py` rewritten** — every hardcoded literal removed
+  (`train_loss`/`val_auc`/`val_f1` array, the `f1`/`auc`/`csi` arrays, the
+  `dsstgat_f1`/`gcn_f1`/etc. arrays, the fabricated calibration curves, the
+  hardcoded `Total Parameters: 528,422` banner text). It now loads only
+  `data/outputs/eval_metrics.json` / `baseline_metrics.json` /
+  `cross_event_metrics.json` and skips any figure it can't back with a real
+  number. The dead `C:\...\Downloads\Hydrograph\...` absolute path (this
+  file's §0) is gone — output paths are config-driven and repo-relative.
+- **A real, full pipeline run against the repo's actual `data/processed/`
+  and `data/outputs/` paths** (not a scratch directory this time):
+  `python main.py --skip-osm --force-retrain --epochs 15
+  --baseline-epochs 15` at a corrected demo bbox (870 nodes; the original
+  ~7,800-node demo bbox measured ~66 min/epoch, so `bbox_demo` was shrunk
+  and documented as such in `config/config.yaml` and `MODEL_CARD.md`).
+  Real `eval_metrics.json`, `baseline_metrics.json`, and (new)
+  `cross_event_metrics.json` now exist at those paths.
+- **A genuine bug this run surfaced and fixed**: `plot_calibration()`
+  (`phase6_inference.py`) crashed (`ValueError: Too many bins for data
+  range`) building a probability histogram when predictions collapse to a
+  single value — `ax_hist.hist(...)` now passes an explicit
+  `range=(0.0, 1.0)` (predictions are sigmoid-bounded regardless of
+  spread), fixed and re-verified.
+- **The result itself, reported honestly, not chased**: at this budget,
+  DS-STGAT and every other gradient-trained baseline collapsed to a
+  trivial "always predict flood" solution (recall=1.0000, AUC-ROC≈0.49-0.50
+  at every lead) and lost to Persistence and Random Forest by a wide
+  margin. This is the split-skew limitation flagged above (§Priority 1,
+  "split flood-rate skew") manifesting concretely, not a new bug — full
+  table, raw-JSON evidence, and an honest read of what it does and doesn't
+  show is in `MODEL_CARD.md` §Metrics.
+- **Dead code archived** (`src/`, `pipeline/`, the second `config` loader,
+  `examples/`, `deploy.py` → `archive/`, with `archive/README.md`
+  explaining why), **`demo.py` fixed** (was calling a v1 API that no
+  longer exists anywhere in this repo; now a thin wrapper over `main.py`'s
+  real pipeline), **`evaluate_paper.py`/`generate_paper.py` marked
+  deprecated** with a runtime warning, **`README.md` rewritten** (the old
+  Quick Start documented the dead `src/` API), **`LICENSE`** and a
+  top-level **`.gitignore`** added (neither existed).
+- One command now reproduces every number in `data/outputs/`:
+  `python main.py --skip-osm --force-retrain --epochs 15
+  --baseline-epochs 15` (see `MODEL_CARD.md` §Reproducibility for the
+  full-budget alternative and why it wasn't run this session).
