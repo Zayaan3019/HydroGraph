@@ -28,6 +28,12 @@ enforced downhill drainage direction), and outputs per-node flood
 probability at 4 forecast horizons (1h / 3h / 6h / 12h) from a shared
 multi-lead sigmoid head.
 
+*Note on the gate:* `TemporalAttentionGate` defaults to
+`use_attn_mixing=False`, which is how the shipped model is built. In that mode
+the softmax weights over the two scales are computed but not applied; the
+fusion is a learned projection of the concatenated short and long GRU states.
+Set `use_attn_mixing=True` (training from scratch) for the weighted mixture.
+
 ```
 rainfall[t-6:t]  ──► short GRU ──┐
                                   ├─► cross-temporal attention gate ─┐

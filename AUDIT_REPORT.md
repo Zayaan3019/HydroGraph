@@ -135,6 +135,12 @@ purely evidence the graph helps on independently-labeled data. Documented in
 `MODEL_CARD.md`; not a train/test leak since it affects all splits equally,
 but real enough to disclose.
 
+*Follow-up check:* `main.py` calls `TemporalEncoder.encode()` without an
+`edge_index`, so in the shipped pipeline this propagation is **off** and the
+labels are node-local. The caveat above applies only if propagation is
+switched on; as shipped, the benchmark gives a graph model no neighbour
+signal to exploit (see `MODEL_CARD.md`, Data).
+
 ### Finding not in the original checklist — split flood-rate skew (HIGH)
 
 Chronological splitting is correct and leak-free, but interacts badly with
